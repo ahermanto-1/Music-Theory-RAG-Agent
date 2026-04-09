@@ -1,0 +1,9 @@
+docling==2.85.0
+sentence-transformers==5.3.0
+transformers==5.5.0
+pinecone==8.1.2
+google-genai==1.71.0
+streamlit==1.56.0
+deepeval==3.9.6
+pydantic==2.12.5
+python-dotenv==1.2.2

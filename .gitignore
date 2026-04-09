@@ -1,0 +1,28 @@
+# Environment variables — never commit real keys
+.env
+.env.local
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# macOS
+.DS_Store
+
+# Source PDFs — add your own to data/
+data/*.pdf
+
+# Generated eval output
+failures.csv
+
+# DeepEval cache
+.deepeval/

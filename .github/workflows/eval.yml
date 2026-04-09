@@ -1,0 +1,39 @@
+name: RAG Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval:
+    name: DeepEval — Faithfulness & Answer Relevancy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install deepeval google-genai pinecone sentence-transformers transformers python-dotenv
+
+      - name: Run eval pipeline
+        env:
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_ENVIRONMENT: ${{ secrets.PINECONE_ENVIRONMENT }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 eval_pipeline.py
+
+      - name: Upload failures report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failures-report
+          path: failures.csv
