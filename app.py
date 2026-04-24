@@ -27,6 +27,76 @@ _load_secrets()
 
 from agent import run  # noqa: E402 — must import after env is populated
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+_SOURCE_LABELS = {
+    "retrieve":   ("Knowledge base", "source-badge-retrieve"),
+    "web_search": ("Web search",     "source-badge-web"),
+    "direct":     ("Direct",         "source-badge-direct"),
+}
+
+def _source_badge(source: str) -> str:
+    label, css_class = _SOURCE_LABELS.get(source, ("Unknown", "source-badge-direct"))
+    return (
+        f"<span class='source-badge {css_class}'>{label}</span>"
+    )
+
+
+def _render_assistant_meta(msg: dict) -> None:
+    """Render source badge, rewrite notice, and sources expander for an assistant message."""
+    source = msg.get("source", "retrieve")
+    st.markdown(_source_badge(source), unsafe_allow_html=True)
+
+    if msg.get("rewritten"):
+        st.info(f"Query rewritten to: *{msg['rewritten']}*")
+
+    steps = msg.get("steps", [])
+    if steps:
+        with st.expander("View agent reasoning"):
+            for i, step in enumerate(steps, 1):
+                st.markdown(
+                    f"<p style='font-size:0.82rem;color:#2a3439;line-height:1.6;"
+                    f"margin:0.1rem 0;'><span style='color:#a9b4b9;font-weight:500;"
+                    f"margin-right:0.4rem;'>{i}.</span>{step}</p>",
+                    unsafe_allow_html=True,
+                )
+
+    chunks = msg.get("chunks", [])
+    if chunks:
+        is_web = source == "web_search"
+        expander_label = f"View {len(chunks)} web results" if is_web else f"View {len(chunks)} sources used"
+        with st.expander(expander_label):
+            for i, chunk in enumerate(chunks, 1):
+                if is_web:
+                    url = chunk["source"]
+                    st.markdown(
+                        f"<p style='font-size:0.75rem;font-weight:600;"
+                        f"color:#455f88;margin-bottom:0.25rem;'>"
+                        f"[{i}] <a href='{url}' target='_blank' "
+                        f"style='color:#455f88;text-decoration:none;'>{url}</a> "
+                        f"<span style='color:#a9b4b9;font-weight:400;'>"
+                        f"score {chunk['score']}</span></p>"
+                        f"<p style='font-size:0.82rem;color:#2a3439;"
+                        f"line-height:1.6;margin-bottom:1rem;'>"
+                        f"{chunk['text'][:400]}{'…' if len(chunk['text']) > 400 else ''}</p>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    label = chunk["source"]
+                    if chunk["chapter"]:
+                        label += f"  ·  {chunk['chapter']}"
+                    st.markdown(
+                        f"<p style='font-size:0.75rem;font-weight:600;"
+                        f"color:#455f88;margin-bottom:0.25rem;'>"
+                        f"[{i}] {label} "
+                        f"<span style='color:#a9b4b9;font-weight:400;'>"
+                        f"score {chunk['score']}</span></p>"
+                        f"<p style='font-size:0.82rem;color:#2a3439;"
+                        f"line-height:1.6;margin-bottom:1rem;'>"
+                        f"{chunk['text'][:400]}{'…' if len(chunk['text']) > 400 else ''}</p>",
+                        unsafe_allow_html=True,
+                    )
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="The Harmonic Curator",
@@ -50,8 +120,9 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* Hide Streamlit chrome */
-#MainMenu, footer, header { visibility: hidden; }
-[data-testid="stToolbar"] { display: none; }
+#MainMenu, footer { visibility: hidden; }
+[data-testid="stToolbar"], [data-testid="stHeader"] { display: none; }
+[data-testid="stSidebarCollapsedControl"] { visibility: visible !important; }
 
 /* ── App background ── */
 .stApp {
@@ -165,6 +236,21 @@ h1, h2, h3, h4, h5, h6 {
     color: #455f88 !important;
 }
 
+/* ── Source badge ── */
+.source-badge {
+    display: inline-block;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    margin-top: 0.6rem;
+}
+.source-badge-retrieve  { background: #e8eef5; color: #455f88; }
+.source-badge-web       { background: #e6f2ec; color: #3d7a52; }
+.source-badge-direct    { background: #f0f0f0; color: #7a8a90; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -199,10 +285,10 @@ with st.sidebar:
     st.markdown(
         "<ol style='font-size:0.82rem;color:#2a3439;line-height:1.8;"
         "padding-left:1.1rem;'>"
-        "<li>Your question is embedded and searched against a knowledge base of music theory PDFs.</li>"
-        "<li>A relevance grader checks if the results are useful.</li>"
-        "<li>If not, your query is automatically rewritten and searched again.</li>"
-        "<li>Gemini 2.5 Flash generates a grounded answer from the best sources.</li>"
+        "<li>A router classifies your query so that the agent knows where to grab information from - either the knowledge base, from the web, or directly from the model's training data.</li>"
+        "<li>If your query requires a knowledge base lookup, a relevance grader checks if the results of the lookup are useful in answering your question. If not, your original query is re-written and is searched against the knowledge base again.</li>"
+        "<li>If your query requires a web search, Tavily is used to grab relevant content from the web.</li>"
+        "<li>The agent generates an answer, using context from the retrieval process if it was required.</li>"
         "</ol>",
         unsafe_allow_html=True,
     )
@@ -233,34 +319,14 @@ st.markdown(
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # each entry: {role, content, chunks, rewritten}
+    st.session_state.messages = []  # each entry: {role, content, chunks, rewritten, source}
 
 # ── Render history ────────────────────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-
         if msg["role"] == "assistant":
-            if msg.get("rewritten"):
-                st.info(f"Query rewritten to: *{msg['rewritten']}*")
-
-            if msg.get("chunks"):
-                with st.expander(f"View {len(msg['chunks'])} sources used"):
-                    for i, chunk in enumerate(msg["chunks"], 1):
-                        label = chunk["source"]
-                        if chunk["chapter"]:
-                            label += f"  ·  {chunk['chapter']}"
-                        st.markdown(
-                            f"<p style='font-size:0.75rem;font-weight:600;"
-                            f"color:#455f88;margin-bottom:0.25rem;'>"
-                            f"[{i}] {label} "
-                            f"<span style='color:#a9b4b9;font-weight:400;'>"
-                            f"score {chunk['score']}</span></p>"
-                            f"<p style='font-size:0.82rem;color:#2a3439;"
-                            f"line-height:1.6;margin-bottom:1rem;'>"
-                            f"{chunk['text'][:400]}{'…' if len(chunk['text']) > 400 else ''}</p>",
-                            unsafe_allow_html=True,
-                        )
+            _render_assistant_meta(msg)
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 if prompt := st.chat_input("e.g. How do I build a minor 7th chord on the guitar?"):
@@ -271,39 +337,26 @@ if prompt := st.chat_input("e.g. How do I build a minor 7th chord on the guitar?
 
     # Assistant response
     with st.chat_message("assistant"):
-        with st.spinner("Searching knowledge base and generating answer…"):
+        with st.spinner("Thinking…"):
             try:
-                answer, chunks, rewritten = run(prompt)
+                result = run(prompt, history=st.session_state.messages[:-1])
+                answer = result.answer
+                chunks = result.chunks
+                rewritten = result.rewritten
+                source = result.source
+                steps = result.steps
             except Exception as e:
                 answer = f"Something went wrong: {e}"
-                chunks, rewritten = [], None
+                chunks, rewritten, source, steps = [], None, "direct", []
 
         st.write(answer)
-
-        if rewritten:
-            st.info(f"Query rewritten to: *{rewritten}*")
-
-        if chunks:
-            with st.expander(f"View {len(chunks)} sources used"):
-                for i, chunk in enumerate(chunks, 1):
-                    label = chunk["source"]
-                    if chunk["chapter"]:
-                        label += f"  ·  {chunk['chapter']}"
-                    st.markdown(
-                        f"<p style='font-size:0.75rem;font-weight:600;"
-                        f"color:#455f88;margin-bottom:0.25rem;'>"
-                        f"[{i}] {label} "
-                        f"<span style='color:#a9b4b9;font-weight:400;'>"
-                        f"score {chunk['score']}</span></p>"
-                        f"<p style='font-size:0.82rem;color:#2a3439;"
-                        f"line-height:1.6;margin-bottom:1rem;'>"
-                        f"{chunk['text'][:400]}{'…' if len(chunk['text']) > 400 else ''}</p>",
-                        unsafe_allow_html=True,
-                    )
+        _render_assistant_meta({"source": source, "rewritten": rewritten, "chunks": chunks, "steps": steps})
 
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
         "chunks": chunks,
         "rewritten": rewritten,
+        "source": source,
+        "steps": steps,
     })

@@ -94,7 +94,8 @@ def evaluate_question(
     print(f"\n{'─' * 60}")
     print(f"Question: {question}")
 
-    answer, chunks, rewritten = run(question)
+    result = run(question)
+    answer, chunks, rewritten = result.answer, result.chunks, result.rewritten
     retrieval_context = [c["text"] for c in chunks]
 
     if rewritten:
