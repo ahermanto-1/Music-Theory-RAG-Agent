@@ -2,8 +2,9 @@
 eval_pipeline.py — DeepEval quality gate for the Music Theory RAG Agent.
 
 Runs Faithfulness and Answer Relevancy on 2 synthetic questions using
-Gemma 3 27B as the LLM judge. Logs failures (score < 0.8) to failures.csv.
-Exits with code 1 if any metric fails — compatible with GitHub Actions.
+a local LM Studio model as the LLM judge. Logs failures (score < 0.8)
+to failures.csv. Exits with code 1 if any metric fails — compatible
+with GitHub Actions.
 
 Usage:
     python3 eval_pipeline.py
@@ -25,14 +26,17 @@ load_dotenv()
 from deepeval.metrics import AnswerRelevancyMetric, FaithfulnessMetric
 from deepeval.models.base_model import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase
-from google import genai
+from langfuse import Langfuse, observe, get_client
+from openai import OpenAI
 from pydantic import BaseModel
 
 from agent import run
 
+langfuse = Langfuse()
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
-JUDGE_MODEL = "gemma-3-27b-it"
+JUDGE_MODEL = os.environ.get("LM_STUDIO_MODEL", "google/gemma-4-e4b")
 PASS_THRESHOLD = 0.8
 FAILURES_CSV = "failures.csv"
 
@@ -41,23 +45,26 @@ SYNTHETIC_QUESTIONS = [
     "How does the circle of fifths help in understanding key signatures and chord progressions?",
 ]
 
-# ── Gemma judge ───────────────────────────────────────────────────────────────
+# ── Local LM Studio judge ─────────────────────────────────────────────────────
 
-class GemmaJudge(DeepEvalBaseLLM):
-    """Wraps Gemma 3 27B (via Google GenAI) as a DeepEval judge."""
+class LocalLMJudge(DeepEvalBaseLLM):
+    """Wraps a local LM Studio model as a DeepEval judge via OpenAI-compatible API."""
 
     def __init__(self):
-        self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        self._client = OpenAI(
+            base_url=os.environ.get("LM_STUDIO_BASE_URL", "http://localhost:1234/v1"),
+            api_key="lm-studio",
+        )
 
     def load_model(self):
         return self._client
 
     def generate(self, prompt: str, schema: Optional[type[BaseModel]] = None):
-        response = self._client.models.generate_content(
+        response = self._client.chat.completions.create(
             model=JUDGE_MODEL,
-            contents=prompt,
+            messages=[{"role": "user", "content": prompt}],
         )
-        text = response.text.strip()
+        text = response.choices[0].message.content.strip()
 
         if schema is not None:
             # Extract JSON from markdown code fences if present
@@ -83,9 +90,10 @@ class GemmaJudge(DeepEvalBaseLLM):
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
+@observe(name="eval_question")
 def evaluate_question(
     question: str,
-    judge: GemmaJudge,
+    judge: LocalLMJudge,
 ) -> list[dict]:
     """
     Run the RAG agent on a question, then score Faithfulness and Answer Relevancy.
@@ -126,6 +134,13 @@ def evaluate_question(
         print(f"  {name}: {score:.4f} [{status}]")
         if metric.reason:
             print(f"    Reason: {metric.reason}")
+
+        # Push score to Langfuse for dashboard tracking
+        get_client().score_current_trace(
+            name=name,
+            value=score,
+            comment=metric.reason or "",
+        )
 
         results.append({
             "question": question,
@@ -173,7 +188,7 @@ def main() -> None:
     print(f"Pass threshold : {PASS_THRESHOLD}")
     print(f"Questions : {len(SYNTHETIC_QUESTIONS)}")
 
-    judge = GemmaJudge()
+    judge = LocalLMJudge()
     all_results: list[dict] = []
 
     for question in SYNTHETIC_QUESTIONS:
@@ -187,6 +202,9 @@ def main() -> None:
     passed = total - len(failures)
     print(f"\n{'═' * 60}")
     print(f"Results: {passed}/{total} metrics passed")
+
+    # Flush all pending traces to Langfuse before exiting
+    langfuse.flush()
 
     if failures:
         print(f"\nFailed metrics:")

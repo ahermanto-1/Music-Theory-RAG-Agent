@@ -12,7 +12,8 @@ import os
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from langfuse.openai import OpenAI  # drop-in replacement — auto-traces every LLM call
+from langfuse import observe, get_client
 
 from retriever import search_knowledge_base
 from web_search import web_search
@@ -60,6 +61,7 @@ def _format_history(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
+@observe(name="llm_call_single")
 def _call(prompt: str) -> str:
     response = _client.chat.completions.create(
         model=_MODEL,
@@ -68,6 +70,7 @@ def _call(prompt: str) -> str:
     return response.choices[0].message.content.strip()
 
 
+@observe(name="llm_call_multi_turn")
 def _call_messages(messages: list[dict]) -> str:
     """Call the model with a proper multi-turn message list."""
     response = _client.chat.completions.create(
@@ -79,6 +82,7 @@ def _call_messages(messages: list[dict]) -> str:
 
 # ── Router ────────────────────────────────────────────────────────────────────
 
+@observe(name="route_query")
 def _route(query: str, history: list[dict]) -> str:
     """
     Classify the query into one of three routing intents:
@@ -119,6 +123,7 @@ Reply with only one word: RETRIEVE, WEB_SEARCH, or DIRECT."""
 
 # ── Core steps ────────────────────────────────────────────────────────────────
 
+@observe(name="grade_relevance")
 def _grade(query: str, chunks: list[dict]) -> bool:
     """Ask Gemini whether the retrieved context is sufficient to answer the query."""
     prompt = f"""You are evaluating whether retrieved context is sufficient to answer a music theory question.
@@ -134,6 +139,7 @@ Does this retrieved context contain the specific musical steps or guitar fretboa
     return answer.startswith("YES")
 
 
+@observe(name="rewrite_query")
 def _rewrite_query(original_query: str, history: list[dict]) -> str:
     """Rewrite the query to improve Pinecone retrieval, using conversation history to resolve references."""
     history_block = ""
@@ -155,6 +161,7 @@ Reply with only the rewritten query, no explanation."""
     return _call(prompt)
 
 
+@observe(name="generate_answer")
 def _generate(query: str, chunks: list[dict], history: list[dict], source: str) -> str:
     """Generate a final answer using proper multi-turn messages for reliable history tracking."""
     if source == "direct":
@@ -183,6 +190,7 @@ def _generate(query: str, chunks: list[dict], history: list[dict], source: str) 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
+@observe(name="agent_run")
 def run(query: str, history: list[dict] | None = None) -> AgentResult:
     """
     Route → retrieve/search/direct → generate.
@@ -209,6 +217,7 @@ def run(query: str, history: list[dict] | None = None) -> AgentResult:
     if intent == "DIRECT":
         steps.append("Answering directly — no retrieval needed.")
         answer = _generate(query, [], history, source="direct")
+        get_client().update_current_span(metadata={"intent": "DIRECT", "source": "direct"})
         return AgentResult(answer=answer, source="direct", steps=steps)
 
     if intent == "WEB_SEARCH":
@@ -217,6 +226,7 @@ def run(query: str, history: list[dict] | None = None) -> AgentResult:
         steps.append(f"Retrieved {len(chunks)} web result(s).")
         steps.append("Generating answer from web results…")
         answer = _generate(query, chunks, history, source="web_search")
+        get_client().update_current_span(metadata={"intent": "WEB_SEARCH", "source": "web_search"})
         return AgentResult(answer=answer, chunks=chunks, source="web_search", steps=steps)
 
     # RETRIEVE path
@@ -239,6 +249,12 @@ def run(query: str, history: list[dict] | None = None) -> AgentResult:
 
     steps.append("Generating final answer…")
     answer = _generate(query, chunks, history, source="retrieve")
+    get_client().update_current_span(metadata={
+        "intent": "RETRIEVE",
+        "source": "retrieve",
+        "rewritten": rewritten is not None,
+        "chunks_count": len(chunks),
+    })
     return AgentResult(answer=answer, chunks=chunks, rewritten=rewritten, source="retrieve", steps=steps)
 
 

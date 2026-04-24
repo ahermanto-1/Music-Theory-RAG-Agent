@@ -7,4 +7,5 @@ streamlit==1.56.0
 deepeval==3.9.6
 pydantic==2.12.5
 python-dotenv==1.2.2
+langfuse>=2.0.0,<3.0.0
 tavily-python==0.7.23
